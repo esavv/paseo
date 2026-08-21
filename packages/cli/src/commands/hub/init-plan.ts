@@ -36,6 +36,10 @@ export interface HubInitScaffold {
   testAction: string;
 }
 
+export function hubLoginResumeCommand(step: "connect" | "init", origin: string): string {
+  return step === "connect" ? `paseo hub connect ${origin}` : "paseo hub init";
+}
+
 export function planHubInitOpening(input: {
   loggedIn: boolean;
   paseoDirectoryExists: boolean;

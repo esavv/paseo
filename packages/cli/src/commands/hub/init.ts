@@ -21,17 +21,22 @@ import type { HubCredentialStore } from "./credentials.js";
 import type { HubDaemonConnection } from "./daemon-client.js";
 import { withHubDaemon } from "./daemon-client.js";
 import { HubCommandError } from "./error.js";
-import type { HubConfigurationResources, HubHttpClient, HubProject } from "./hub-client/index.js";
+import type {
+  HubConfigurationResources,
+  HubHttpClient,
+  HubProject,
+  HubSetupResources,
+} from "./hub-client/index.js";
 import {
   createHubInitBundle,
   createHubInitScaffold,
+  hubLoginResumeCommand,
   planHubInitOpening,
   resolveHubInitConnection,
   resolveHubInitProjects,
   type HubInitProvider,
 } from "./init-plan.js";
 import type { CliLoginFlow } from "./login-flow.js";
-import { runHubLogin } from "./login.js";
 import { runHubConnect } from "./connect.js";
 import { runHubDeployBundle } from "./deploy.js";
 import { runHubProjects } from "./projects.js";
@@ -42,7 +47,7 @@ const execFileAsync = promisify(execFile);
 const DAEMON_READY_TIMEOUT_MS = 60_000;
 const DAEMON_READY_POLL_MS = 250;
 
-interface HubInitEnvironment {
+export interface HubGuidedSetupEnvironment {
   env: Readonly<Record<string, string | undefined>>;
   credentials: HubCredentialStore;
   hub: HubHttpClient;
@@ -61,7 +66,7 @@ function initErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export function addHubInitCommand(parent: Command, environment: HubInitEnvironment): void {
+export function addHubInitCommand(parent: Command, environment: HubGuidedSetupEnvironment): void {
   parent
     .command("init")
     .description("Create and optionally deploy a safe starter Hub bundle")
@@ -79,7 +84,11 @@ export function addHubInitCommand(parent: Command, environment: HubInitEnvironme
     });
 }
 
-export async function runHubInit(environment: HubInitEnvironment): Promise<void> {
+export async function runHubInit(environment: HubGuidedSetupEnvironment): Promise<void> {
+  await runHubGuidedSetup(environment);
+}
+
+export async function runHubGuidedSetup(environment: HubGuidedSetupEnvironment): Promise<void> {
   requireInteractiveTerminal();
   intro("Set up Paseo Hub");
 
@@ -99,14 +108,8 @@ export async function runHubInit(environment: HubInitEnvironment): Promise<void>
   const origin = await ensureLogin(activeLogin?.origin, environment);
   const daemonId = await ensureDaemonConnection(origin, environment);
   const project = await chooseProject(origin, environment);
-  const resources = await loadConfigurationResources(origin, environment);
-  const daemon = resources.daemons.find(({ id }) => id === daemonId);
-  if (daemon === undefined) {
-    throw new HubCommandError(
-      "HUB_DAEMON_RESOURCE_MISSING",
-      "The connected daemon is not available in this Hub organization. Reconnect it and try again.",
-    );
-  }
+  const resources = await loadSetupResources(origin, environment);
+  const daemon = await loadDaemonResource(origin, daemonId, environment);
   log.success(`Connected as ${daemon.slug}`);
   const provider = await chooseProvider();
   const providerFilters = await collectProviderFilters(provider, resources, cwd);
@@ -153,9 +156,25 @@ export async function runHubInit(environment: HubInitEnvironment): Promise<void>
   outro(deploy ? "Hub is ready" : "Hub bundle is ready");
 }
 
+export async function continueHubGuidedSetup(
+  origin: string,
+  environment: HubGuidedSetupEnvironment,
+): Promise<void> {
+  if (!(await requiredConfirm(`Connect this daemon to ${origin}?`, true))) {
+    log.message(`Skipped daemon connection. Run: ${hubLoginResumeCommand("connect", origin)}`);
+    return;
+  }
+  await ensureDaemonConnection(origin, environment, true);
+  if (!(await requiredConfirm("Initialize and deploy a starter workflow?", true))) {
+    log.message(`Skipped starter workflow. Run: ${hubLoginResumeCommand("init", origin)}`);
+    return;
+  }
+  await runHubGuidedSetup(environment);
+}
+
 async function ensureLogin(
   activeOrigin: string | undefined,
-  environment: HubInitEnvironment,
+  environment: HubGuidedSetupEnvironment,
 ): Promise<string> {
   const endpoint = await requiredSelect({
     message: "Hub endpoint",
@@ -189,23 +208,17 @@ async function ensureLogin(
     log.success(`Logged in to ${normalizedOrigin}`);
     return normalizedOrigin;
   }
-  await runHubLogin(
-    normalizedOrigin,
-    {},
-    {
-      env: environment.env,
-      credentials: environment.credentials,
-      flow: environment.login,
-      reporter: environment.reporter,
-    },
-  );
+  environment.reporter.progress(`Logging in to ${normalizedOrigin}`);
+  const credential = await environment.login.authorize(normalizedOrigin);
+  environment.credentials.save({ origin: normalizedOrigin, credential });
   log.success(`Logged in to ${normalizedOrigin}`);
   return normalizedOrigin;
 }
 
 async function ensureDaemonConnection(
   origin: string,
-  environment: HubInitEnvironment,
+  environment: HubGuidedSetupEnvironment,
+  confirmed = false,
 ): Promise<string> {
   const status = await withHubDaemon(environment.daemon, undefined, async (daemon) =>
     daemon.getHubStatus().then((response) => response.status),
@@ -223,9 +236,16 @@ async function ensureDaemonConnection(
       `This daemon is connected to ${connection.origin}. Disconnect it before running Hub init for ${origin}.`,
     );
   }
-  if (!(await requiredConfirm(`Connect this daemon to ${origin}?`, true))) {
+  if (!confirmed && !(await requiredConfirm(`Connect this daemon to ${origin}?`, true))) {
     throw new HubInitCancelledError("A connected daemon is required to create the bundle.");
   }
+  return connectDaemon(origin, environment);
+}
+
+async function connectDaemon(
+  origin: string,
+  environment: HubGuidedSetupEnvironment,
+): Promise<string> {
   await runHubConnect(
     origin,
     {},
@@ -276,7 +296,10 @@ async function waitForDaemonReady(
   );
 }
 
-async function chooseProject(origin: string, environment: HubInitEnvironment): Promise<HubProject> {
+async function chooseProject(
+  origin: string,
+  environment: HubGuidedSetupEnvironment,
+): Promise<HubProject> {
   const result = await runHubProjects(
     { hub: origin },
     {
@@ -326,7 +349,7 @@ async function chooseProvider(): Promise<HubInitProvider> {
 
 async function collectProviderFilters(
   provider: HubInitProvider,
-  resources: HubConfigurationResources,
+  resources: HubSetupResources,
   cwd: string,
 ): Promise<Readonly<Record<string, string>>> {
   if (provider === "github") {
@@ -360,31 +383,31 @@ async function collectProviderFilters(
     return {
       workspace: await chooseConnection(
         "Slack workspace",
-        resources.slack.map(({ slug, teamName }) => ({ slug, label: teamName })),
+        resources.slack.map(({ teamId, teamName }) => ({ id: teamId, label: teamName })),
       ),
       user: await requiredText({
-        message: "Your Slack username (only this user can trigger the bot)",
+        message: "Your Slack member ID (only this user can trigger the bot)",
       }),
     };
   }
   return {
     guild: await chooseConnection(
       "Discord server",
-      resources.discord.map(({ slug, guildName }) => ({ slug, label: guildName })),
+      resources.discord.map(({ guildId, guildName }) => ({ id: guildId, label: guildName })),
     ),
     user: await requiredText({
-      message: "Your Discord username (only this user can trigger the bot)",
+      message: "Your Discord user ID (only this user can trigger the bot)",
     }),
   };
 }
 
-async function loadConfigurationResources(
+async function loadSetupResources(
   origin: string,
-  environment: HubInitEnvironment,
-): Promise<HubConfigurationResources> {
+  environment: HubGuidedSetupEnvironment,
+): Promise<HubSetupResources> {
   try {
     return await withSpinner("Loading Hub connections", () =>
-      environment.hub.listConfigurationResources(
+      environment.hub.listSetupResources(
         origin,
         resolveHubCredential({
           options: { origin },
@@ -398,16 +421,40 @@ async function loadConfigurationResources(
     if (error instanceof HubCommandError && error.code === "HUB_NOT_FOUND") {
       throw new HubCommandError(
         "HUB_UPDATE_REQUIRED",
-        "This Hub does not support guided setup. Update the Hub and try again.",
+        "This Hub needs an update before guided setup can use provider IDs. Update Hub and try again.",
       );
     }
     throw error;
   }
 }
 
+async function loadDaemonResource(
+  origin: string,
+  daemonId: string,
+  environment: HubGuidedSetupEnvironment,
+): Promise<HubConfigurationResources["daemons"][number]> {
+  const resources = await environment.hub.listConfigurationResources(
+    origin,
+    resolveHubCredential({
+      options: { origin },
+      env: environment.env,
+      credentials: environment.credentials,
+      origin,
+    }),
+  );
+  const daemon = resources.daemons.find(({ id }) => id === daemonId);
+  if (daemon === undefined) {
+    throw new HubCommandError(
+      "HUB_DAEMON_RESOURCE_MISSING",
+      "The connected daemon is not available in this Hub organization. Reconnect it and try again.",
+    );
+  }
+  return daemon;
+}
+
 async function chooseConnection(
   message: string,
-  connections: readonly { slug: string; label: string }[],
+  connections: readonly { id: string; label: string }[],
 ): Promise<string> {
   if (connections.length === 0) {
     throw new HubCommandError(
@@ -415,10 +462,10 @@ async function chooseConnection(
       `No ${message.toLowerCase()} is connected in this Hub organization. Connect one and try again.`,
     );
   }
-  if (connections.length === 1) return connections[0]!.slug;
+  if (connections.length === 1) return connections[0]!.id;
   return requiredSelect({
     message,
-    options: connections.map(({ slug, label }) => ({ value: slug, label })),
+    options: connections.map(({ id, label }) => ({ value: id, label })),
   });
 }
 
