@@ -55,6 +55,19 @@ export interface HubGuidedSetupEnvironment {
   daemon: HubDaemonConnection;
   reporter: HubReporter;
   cwd(): string;
+  isInteractive?(): boolean;
+  prompts?: {
+    confirm(message: string, initialValue: boolean): Promise<boolean>;
+    select(options: Parameters<typeof select<string>>[0]): Promise<string>;
+    text(options: Parameters<typeof text>[0]): Promise<string>;
+    message(value: string): void;
+  };
+}
+
+interface HubGuidedSetupState {
+  origin?: string;
+  daemonId?: string;
+  deploy?: boolean;
 }
 
 class HubInitCancelledError extends Error {}
@@ -88,8 +101,11 @@ export async function runHubInit(environment: HubGuidedSetupEnvironment): Promis
   await runHubGuidedSetup(environment);
 }
 
-export async function runHubGuidedSetup(environment: HubGuidedSetupEnvironment): Promise<void> {
-  requireInteractiveTerminal();
+export async function runHubGuidedSetup(
+  environment: HubGuidedSetupEnvironment,
+  state: HubGuidedSetupState = {},
+): Promise<void> {
+  requireInteractiveTerminal(environment);
   intro("Set up Paseo Hub");
 
   const cwd = environment.cwd();
@@ -100,19 +116,19 @@ export async function runHubGuidedSetup(environment: HubGuidedSetupEnvironment):
   });
   if (
     opening.replaceExisting &&
-    !(await requiredConfirm("Replace the existing .paseo/ Hub bundle?", false))
+    !(await requiredConfirm(environment, "Replace the existing .paseo/ Hub bundle?", false))
   ) {
     throw new HubInitCancelledError("Existing .paseo/ bundle left unchanged.");
   }
 
-  const origin = await ensureLogin(activeLogin?.origin, environment);
-  const daemonId = await ensureDaemonConnection(origin, environment);
+  const origin = state.origin ?? (await ensureLogin(activeLogin?.origin, environment));
+  const daemonId = state.daemonId ?? (await ensureDaemonConnection(origin, environment));
   const project = await chooseProject(origin, environment);
   const resources = await loadSetupResources(origin, environment);
   const daemon = await loadDaemonResource(origin, daemonId, environment);
   log.success(`Connected as ${daemon.slug}`);
-  const provider = await chooseProvider();
-  const providerFilters = await collectProviderFilters(provider, resources, cwd);
+  const provider = await chooseProvider(environment);
+  const providerFilters = await collectProviderFilters(provider, resources, cwd, environment);
   const scaffold = createHubInitScaffold({
     cwd,
     daemonSlug: daemon.slug,
@@ -135,7 +151,7 @@ export async function runHubGuidedSetup(environment: HubGuidedSetupEnvironment):
   await writeScaffold(cwd, scaffold, opening.replaceExisting);
   log.success(`Created .paseo/hub.yml and ${scaffold.workflowPath}`);
 
-  const deploy = await requiredConfirm("Deploy now?", true);
+  const deploy = state.deploy ?? (await requiredConfirm(environment, "Deploy now?", true));
   if (deploy) {
     await withSpinner("Deploying bundle", async () => {
       await runHubDeployBundle({ project: project.slug, hub: origin }, bundle, {
@@ -148,7 +164,7 @@ export async function runHubGuidedSetup(environment: HubGuidedSetupEnvironment):
     });
     log.success("Deployed");
   } else {
-    log.message(`Skipped deployment. Run: paseo hub deploy -p ${project.slug}`);
+    reportMessage(environment, `Skipped deployment. Run: paseo hub deploy -p ${project.slug}`);
   }
 
   const activityUrl = new URL(`/projects/${project.slug}/activity`, origin).toString();
@@ -160,23 +176,29 @@ export async function continueHubGuidedSetup(
   origin: string,
   environment: HubGuidedSetupEnvironment,
 ): Promise<void> {
-  if (!(await requiredConfirm(`Connect this daemon to ${origin}?`, true))) {
-    log.message(`Skipped daemon connection. Run: ${hubLoginResumeCommand("connect", origin)}`);
+  if (!(await requiredConfirm(environment, `Connect this daemon to ${origin}?`, true))) {
+    reportMessage(
+      environment,
+      `Skipped daemon connection. Run: ${hubLoginResumeCommand("connect", origin)}; then paseo hub init`,
+    );
     return;
   }
-  await ensureDaemonConnection(origin, environment, true);
-  if (!(await requiredConfirm("Initialize and deploy a starter workflow?", true))) {
-    log.message(`Skipped starter workflow. Run: ${hubLoginResumeCommand("init", origin)}`);
+  const daemonId = await ensureDaemonConnection(origin, environment, true);
+  if (!(await requiredConfirm(environment, "Initialize and deploy a starter workflow?", true))) {
+    reportMessage(
+      environment,
+      `Skipped starter workflow. Run: ${hubLoginResumeCommand("init", origin)}`,
+    );
     return;
   }
-  await runHubGuidedSetup(environment);
+  await runHubGuidedSetup(environment, { origin, daemonId, deploy: true });
 }
 
 async function ensureLogin(
   activeOrigin: string | undefined,
   environment: HubGuidedSetupEnvironment,
 ): Promise<string> {
-  const endpoint = await requiredSelect({
+  const endpoint = await requiredSelect(environment, {
     message: "Hub endpoint",
     initialValue:
       activeOrigin === undefined || activeOrigin === DEFAULT_HUB_ORIGIN ? "hosted" : "custom",
@@ -188,7 +210,7 @@ async function ensureLogin(
   const origin =
     endpoint === "hosted"
       ? DEFAULT_HUB_ORIGIN
-      : await requiredText({
+      : await requiredText(environment, {
           message: "Custom Hub URL",
           initialValue:
             activeOrigin === undefined || activeOrigin === DEFAULT_HUB_ORIGIN
@@ -236,7 +258,10 @@ async function ensureDaemonConnection(
       `This daemon is connected to ${connection.origin}. Disconnect it before running Hub init for ${origin}.`,
     );
   }
-  if (!confirmed && !(await requiredConfirm(`Connect this daemon to ${origin}?`, true))) {
+  if (
+    !confirmed &&
+    !(await requiredConfirm(environment, `Connect this daemon to ${origin}?`, true))
+  ) {
     throw new HubInitCancelledError("A connected daemon is required to create the bundle.");
   }
   return connectDaemon(origin, environment);
@@ -318,7 +343,7 @@ async function chooseProject(
   if (resolution.kind === "selected") {
     return resolution.project;
   }
-  const slug = await requiredSelect({
+  const slug = await requiredSelect(environment, {
     message: "Project",
     options: resolution.projects.map((project) => ({
       value: project.slug,
@@ -336,8 +361,8 @@ async function chooseProject(
   return project;
 }
 
-async function chooseProvider(): Promise<HubInitProvider> {
-  return requiredSelect({
+async function chooseProvider(environment: HubGuidedSetupEnvironment): Promise<HubInitProvider> {
+  return requiredSelect(environment, {
     message: "Trigger provider",
     options: [
       { value: "github", label: "GitHub", hint: "issue or pull request comment" },
@@ -351,6 +376,7 @@ async function collectProviderFilters(
   provider: HubInitProvider,
   resources: HubSetupResources,
   cwd: string,
+  environment: HubGuidedSetupEnvironment,
 ): Promise<Readonly<Record<string, string>>> {
   if (provider === "github") {
     const [login, originRemote] = await Promise.all([
@@ -372,7 +398,7 @@ async function collectProviderFilters(
       );
     }
     return {
-      user: await requiredText({
+      user: await requiredText(environment, {
         message: "Your GitHub username (only this user can trigger the bot)",
         initialValue: login,
       }),
@@ -382,20 +408,22 @@ async function collectProviderFilters(
   if (provider === "slack") {
     return {
       workspace: await chooseConnection(
+        environment,
         "Slack workspace",
         resources.slack.map(({ teamId, teamName }) => ({ id: teamId, label: teamName })),
       ),
-      user: await requiredText({
+      user: await requiredText(environment, {
         message: "Your Slack member ID (only this user can trigger the bot)",
       }),
     };
   }
   return {
     guild: await chooseConnection(
+      environment,
       "Discord server",
       resources.discord.map(({ guildId, guildName }) => ({ id: guildId, label: guildName })),
     ),
-    user: await requiredText({
+    user: await requiredText(environment, {
       message: "Your Discord user ID (only this user can trigger the bot)",
     }),
   };
@@ -453,6 +481,7 @@ async function loadDaemonResource(
 }
 
 async function chooseConnection(
+  environment: HubGuidedSetupEnvironment,
   message: string,
   connections: readonly { id: string; label: string }[],
 ): Promise<string> {
@@ -463,7 +492,7 @@ async function chooseConnection(
     );
   }
   if (connections.length === 1) return connections[0]!.id;
-  return requiredSelect({
+  return requiredSelect(environment, {
     message,
     options: connections.map(({ id, label }) => ({ value: id, label })),
   });
@@ -570,36 +599,62 @@ async function withSpinner<T>(
   }
 }
 
-async function requiredText(options: Parameters<typeof text>[0]): Promise<string> {
-  const answer = await text({
+async function requiredText(
+  environment: HubGuidedSetupEnvironment,
+  options: Parameters<typeof text>[0],
+): Promise<string> {
+  const request = {
     ...options,
-    validate(value) {
+    validate(value: string | undefined) {
       const input = value ?? "";
       const customError = options.validate?.(input);
       if (customError !== undefined) return customError;
       return input.trim().length === 0 ? "A value is required" : undefined;
     },
-  });
+  };
+  const answer =
+    environment.prompts === undefined
+      ? await text(request)
+      : await environment.prompts.text(request);
   if (isCancel(answer)) throw new HubInitCancelledError("Hub init cancelled.");
   return answer.trim();
 }
 
-async function requiredConfirm(message: string, initialValue: boolean): Promise<boolean> {
-  const answer = await confirm({ message, initialValue });
+async function requiredConfirm(
+  environment: HubGuidedSetupEnvironment,
+  message: string,
+  initialValue: boolean,
+): Promise<boolean> {
+  const answer =
+    environment.prompts === undefined
+      ? await confirm({ message, initialValue })
+      : await environment.prompts.confirm(message, initialValue);
   if (isCancel(answer)) throw new HubInitCancelledError("Hub init cancelled.");
   return answer;
 }
 
 async function requiredSelect<T extends string>(
+  environment: HubGuidedSetupEnvironment,
   options: Parameters<typeof select<T>>[0],
 ): Promise<T> {
-  const answer = await select<T>(options);
+  const answer =
+    environment.prompts === undefined
+      ? await select<T>(options)
+      : ((await environment.prompts.select(options as Parameters<typeof select<string>>[0])) as T);
   if (isCancel(answer)) throw new HubInitCancelledError("Hub init cancelled.");
   return answer;
 }
 
-function requireInteractiveTerminal(): void {
-  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+function requireInteractiveTerminal(environment: HubGuidedSetupEnvironment): void {
+  if (!(environment.isInteractive?.() ?? (process.stdin.isTTY && process.stdout.isTTY))) {
     throw new HubCommandError("HUB_INIT_INTERACTIVE_REQUIRED", "paseo hub init requires a TTY.");
   }
+}
+
+function reportMessage(environment: HubGuidedSetupEnvironment, message: string): void {
+  if (environment.prompts === undefined) {
+    log.message(message);
+    return;
+  }
+  environment.prompts.message(message);
 }
