@@ -59,6 +59,10 @@ export function launchOption(page: Page, optionId: string) {
   return page.getByTestId(`new-workspace-launch-option-${optionId}`);
 }
 
+export function importSessionOption(page: Page) {
+  return page.getByTestId("new-workspace-launch-import-session");
+}
+
 export function manageProfilesOption(page: Page) {
   return page.getByTestId("new-workspace-launch-manage-profiles");
 }

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "r
 import type { ReactElement, RefObject } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
+import { useRouter, type Href } from "expo-router";
 import { Pressable, StyleSheet as RNStyleSheet, Text, View } from "react-native";
 import type { PressableStateCallbackType } from "react-native";
 import { StyleSheet, useUnistyles, withUnistyles } from "react-native-unistyles";
@@ -18,6 +19,7 @@ import {
 } from "@/composer/attachments/submit";
 import { HostStatusDot } from "@/components/host-status-dot";
 import { HostPicker } from "@/components/hosts/host-picker";
+import { ImportSessionSheet } from "@/components/import-session-sheet";
 import { ProjectIconView } from "@/components/project-icon-view";
 import { Combobox, ComboboxItem } from "@/components/ui/combobox";
 import type { ComboboxOption as ComboboxOptionType, ComboboxProps } from "@/components/ui/combobox";
@@ -69,6 +71,7 @@ import { useShortcutKeys } from "@/hooks/use-shortcut-keys";
 import type { CreateAgentInitialValues } from "@/hooks/use-agent-form-state";
 import { generateMessageId } from "@/types/stream";
 import { toErrorMessage } from "@/utils/error-messages";
+import { buildHostAgentDetailRoute } from "@/utils/host-routes";
 import { projectIconPlaceholderLabelFromDisplayName } from "@/utils/project-display-name";
 import {
   getHostProjectSourceDirectory,
@@ -1333,6 +1336,8 @@ interface NewWorkspaceFormStackInput {
     serverId: string;
     target: LaunchTarget;
     onChange: (target: LaunchTarget) => void;
+    onImportSession: () => void;
+    showImportSession: boolean;
     profiles: readonly TerminalProfile[];
     disabled: boolean;
   };
@@ -1508,6 +1513,8 @@ function useNewWorkspaceFormStack(input: NewWorkspaceFormStackInput): ReactEleme
       serverId={launch.serverId}
       target={launch.target}
       onChange={launch.onChange}
+      onImportSession={launch.onImportSession}
+      showImportSession={launch.showImportSession}
       profiles={launch.profiles}
       disabled={launch.disabled}
       badgePressableStyle={badgePressableStyle}
@@ -1547,6 +1554,7 @@ export function NewWorkspaceScreen({
   const queryClient = useQueryClient();
   const { theme } = useUnistyles();
   const { t } = useTranslation();
+  const router = useRouter();
   const insets = useSafeAreaInsets();
   const isCompact = useIsCompactFormFactor();
   const toast = useToast();
@@ -1576,6 +1584,7 @@ export function NewWorkspaceScreen({
     typeof normalizeWorkspaceDescriptor
   > | null>(null);
   const [pendingAction, setPendingAction] = useState<"chat" | "empty" | "terminal" | null>(null);
+  const [isImportSheetOpen, setIsImportSheetOpen] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   const openAddProjectPicker = useOpenAddProject();
@@ -2137,6 +2146,15 @@ export function NewWorkspaceScreen({
     withConnectedClient,
   ]);
 
+  const openImportSession = useCallback(() => setIsImportSheetOpen(true), []);
+  const closeImportSession = useCallback(() => setIsImportSheetOpen(false), []);
+  const handleImportedSession = useCallback(
+    (agent: { id: string }) => {
+      router.push(buildHostAgentDetailRoute(selectedServerId, agent.id) as Href);
+    },
+    [router, selectedServerId],
+  );
+
   const renderPickerOption = useCallback(
     (props: {
       option: ComboboxOptionType;
@@ -2250,6 +2268,8 @@ export function NewWorkspaceScreen({
       serverId: selectedServerId,
       target: launchTarget,
       onChange: setManualLaunchTarget,
+      onImportSession: openImportSession,
+      showImportSession: effectiveIsolation === "local",
       profiles: terminalProfiles,
       disabled: isPending,
     },
@@ -2330,6 +2350,14 @@ export function NewWorkspaceScreen({
           {errorMessage ? <Text style={styles.errorText}>{errorMessage}</Text> : null}
         </KeyboardTranslateView>
       </View>
+      <ImportSessionSheet
+        visible={isImportSheetOpen}
+        client={client}
+        serverId={selectedServerId}
+        cwd={selectedSourceDirectory}
+        onClose={closeImportSession}
+        onImported={handleImportedSession}
+      />
     </FileDropZone>
   );
 }

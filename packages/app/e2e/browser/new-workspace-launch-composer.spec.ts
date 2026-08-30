@@ -5,6 +5,7 @@ import {
   expectNewWorkspaceDraft,
   fillNewWorkspaceDraft,
   openNewWorkspaceComposer,
+  selectWorkspaceIsolation,
 } from "../support/helpers/new-workspace";
 import { seedWorkspace, type SeededWorkspace } from "../support/helpers/seed-client";
 import {
@@ -12,6 +13,8 @@ import {
   expectChatComposerActive,
   expectTerminalComposerActive,
   fillTerminalPrompt,
+  importSessionOption,
+  openLaunchMenu,
   seedTerminalProfiles,
   selectChatLaunch,
   selectLaunchOption,
@@ -82,5 +85,33 @@ test.describe("New workspace: the composer is one control in two modes", () => {
       await expectTerminalComposerActive(page);
       await expect(terminalPromptInput(page)).toHaveValue("a terminal-only draft");
     });
+  });
+
+  test("Import session opens from New workspace and dismisses back to the unchanged Chat form", async ({
+    page,
+  }) => {
+    await gotoAppShell(page);
+    await waitForSidebarHydration(page);
+    await openNewWorkspaceComposer(page, {
+      projectKey: workspace.projectKey,
+      projectDisplayName: workspace.projectDisplayName,
+    });
+    await selectWorkspaceIsolation(page, "local");
+    await fillNewWorkspaceDraft(page, "keep this chat draft");
+
+    await openLaunchMenu(page);
+    await expect(importSessionOption(page)).toBeEnabled();
+    await importSessionOption(page).click();
+
+    const importSheet = page.getByTestId("import-session-sheet");
+    await expect(importSheet).toBeVisible({ timeout: 30_000 });
+    await importSheet.getByRole("button", { name: "Close" }).click();
+    await expect(importSheet).toHaveCount(0);
+    await expectChatComposerActive(page);
+    await expectNewWorkspaceDraft(page, "keep this chat draft");
+
+    await selectWorkspaceIsolation(page, "worktree");
+    await openLaunchMenu(page);
+    await expect(importSessionOption(page)).toHaveCount(0);
   });
 });
