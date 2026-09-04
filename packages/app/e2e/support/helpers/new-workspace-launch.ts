@@ -60,7 +60,7 @@ export function launchOption(page: Page, optionId: string) {
 }
 
 export function importSessionOption(page: Page) {
-  return page.getByTestId("new-workspace-launch-import-session");
+  return launchMenu(page).getByRole("menuitem", { name: "Import session", exact: true });
 }
 
 export function manageProfilesOption(page: Page) {
@@ -99,6 +99,23 @@ export function terminalLaunchSubmit(page: Page) {
 export async function openLaunchMenu(page: Page): Promise<void> {
   await launchTrigger(page).click();
   await expect(launchMenu(page)).toBeVisible({ timeout: 30_000 });
+}
+
+export async function openAndDismissImportSession(page: Page): Promise<void> {
+  await openLaunchMenu(page);
+  const option = importSessionOption(page);
+  await expect(option).toBeEnabled();
+  await option.click();
+
+  const sheet = page.getByTestId("import-session-sheet");
+  await expect(sheet).toBeVisible({ timeout: 30_000 });
+  await sheet.getByRole("button", { name: "Close" }).click();
+  await expect(sheet).toHaveCount(0);
+}
+
+export async function expectImportSessionUnavailable(page: Page): Promise<void> {
+  await openLaunchMenu(page);
+  await expect(importSessionOption(page)).toHaveCount(0);
 }
 
 /** `optionId` is `chat`, `blank`, or a terminal profile id. */

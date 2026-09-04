@@ -1,4 +1,4 @@
-import { expect, test } from "../support/fixtures";
+import { expect, test, type Page } from "../support/fixtures";
 import { gotoAppShell } from "../support/helpers/app";
 import { waitForSidebarHydration } from "../support/helpers/workspace-ui";
 import {
@@ -11,10 +11,10 @@ import { seedWorkspace, type SeededWorkspace } from "../support/helpers/seed-cli
 import {
   attachButton,
   expectChatComposerActive,
+  expectImportSessionUnavailable,
   expectTerminalComposerActive,
   fillTerminalPrompt,
-  importSessionOption,
-  openLaunchMenu,
+  openAndDismissImportSession,
   seedTerminalProfiles,
   selectChatLaunch,
   selectLaunchOption,
@@ -90,28 +90,25 @@ test.describe("New workspace: the composer is one control in two modes", () => {
   test("Import session opens from New workspace and dismisses back to the unchanged Chat form", async ({
     page,
   }) => {
-    await gotoAppShell(page);
-    await waitForSidebarHydration(page);
-    await openNewWorkspaceComposer(page, {
-      projectKey: workspace.projectKey,
-      projectDisplayName: workspace.projectDisplayName,
-    });
-    await selectWorkspaceIsolation(page, "local");
+    await openLocalNewWorkspaceComposer(page, workspace);
     await fillNewWorkspaceDraft(page, "keep this chat draft");
-
-    await openLaunchMenu(page);
-    await expect(importSessionOption(page)).toBeEnabled();
-    await importSessionOption(page).click();
-
-    const importSheet = page.getByTestId("import-session-sheet");
-    await expect(importSheet).toBeVisible({ timeout: 30_000 });
-    await importSheet.getByRole("button", { name: "Close" }).click();
-    await expect(importSheet).toHaveCount(0);
+    await openAndDismissImportSession(page);
     await expectChatComposerActive(page);
     await expectNewWorkspaceDraft(page, "keep this chat draft");
-
     await selectWorkspaceIsolation(page, "worktree");
-    await openLaunchMenu(page);
-    await expect(importSessionOption(page)).toHaveCount(0);
+    await expectImportSessionUnavailable(page);
   });
 });
+
+async function openLocalNewWorkspaceComposer(
+  page: Page,
+  workspace: SeededWorkspace,
+): Promise<void> {
+  await gotoAppShell(page);
+  await waitForSidebarHydration(page);
+  await openNewWorkspaceComposer(page, {
+    projectKey: workspace.projectKey,
+    projectDisplayName: workspace.projectDisplayName,
+  });
+  await selectWorkspaceIsolation(page, "local");
+}
